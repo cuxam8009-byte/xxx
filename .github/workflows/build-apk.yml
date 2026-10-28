@@ -1,0 +1,108 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Lấy code từ GitHub
+        uses: actions/checkout@v4
+
+      - name: Tìm dự án Flutter (hỗ trợ cả khi bạn chỉ up file .zip)
+        shell: bash
+        run: |
+          set -e
+          APP_DIR=""
+          if [ -f pubspec.yaml ]; then
+            APP_DIR="."
+          else
+            PUB0="$(find . -maxdepth 3 -name pubspec.yaml -not -path './.git/*' -not -path './_app/*' | head -n 1)"
+            if [ -n "$PUB0" ]; then APP_DIR="$(dirname "$PUB0")"; fi
+          fi
+          if [ -z "$APP_DIR" ]; then
+            ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' -not -path './.git/*' | head -n 1)"
+            if [ -n "$ZIP" ]; then
+              echo "Đang giải nén: $ZIP"
+              mkdir -p "$GITHUB_WORKSPACE/_app"
+              unzip -q -o "$ZIP" -d "$GITHUB_WORKSPACE/_app"
+              PUB="$(find "$GITHUB_WORKSPACE/_app" -maxdepth 4 -name pubspec.yaml -not -path '*__MACOSX*' | head -n 1)"
+              if [ -n "$PUB" ]; then APP_DIR="$(dirname "$PUB")"; fi
+            fi
+          fi
+          if [ -z "$APP_DIR" ]; then
+            echo "::error::Không tìm thấy pubspec.yaml. Hãy up file .zip của dự án (hoặc giải nén rồi up cả thư mục) lên repo."
+            exit 1
+          fi
+          echo "Dự án nằm ở: $APP_DIR"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Cài Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cài Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.32.x'
+          cache: true
+
+      - name: Tạo khung Android, icon và tên ứng dụng
+        shell: bash
+        run: |
+          set -e
+          cd "$APP_DIR"
+          rm -rf /tmp/lib_backup && cp -r lib /tmp/lib_backup
+          cp pubspec.yaml /tmp/pubspec_backup.yaml
+          flutter create --platforms=android --project-name bimbip_python --org vn.bimbip .
+          rm -rf lib && cp -r /tmp/lib_backup lib
+          cp /tmp/pubspec_backup.yaml pubspec.yaml
+          RES=android/app/src/main/res
+          if [ -d assets/icon/res ]; then
+            rm -f $RES/mipmap-*/ic_launcher.* $RES/mipmap-*/ic_launcher_round.*
+            rm -rf $RES/mipmap-anydpi-v26
+            cp -r assets/icon/res/* $RES/
+            for d in $RES/mipmap-*; do cp "$d/ic_launcher.png" "$d/ic_launcher_round.png"; done
+          fi
+          sed -i 's|android:label="[^"]*"|android:label="Bìm Bịp Python"|' android/app/src/main/AndroidManifest.xml
+          grep -n "android:label" android/app/src/main/AndroidManifest.xml || true
+
+      - name: Tải thư viện
+        shell: bash
+        run: |
+          cd "$APP_DIR"
+          flutter pub get
+
+      - name: Build file APK
+        shell: bash
+        run: |
+          set -e
+          cd "$APP_DIR"
+          flutter build apk --release --no-tree-shake-icons
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp build/app/outputs/flutter-apk/app-release.apk "$GITHUB_WORKSPACE/out/BimBipPython.apk"
+          ls -lh "$GITHUB_WORKSPACE/out"
+
+      - name: Lưu APK (tab Actions → Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: BimBipPython-APK
+          path: out/BimBipPython.apk
+
+      - name: Đăng APK lên mục Releases (tải trực tiếp trên điện thoại)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Bìm Bịp Python - bản build #${{ github.run_number }}
+          body: Tải file BimBipPython.apk bên dưới rồi cài lên điện thoại Android.
+          files: out/BimBipPython.apk
